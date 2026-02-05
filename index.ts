@@ -969,11 +969,13 @@ export default function skillToggleExtension(pi: ExtensionAPI): void {
 				try {
 					applyChanges(result.changes, byName);
 					
-					const enabledCount = Array.from(result.changes.values()).filter(v => v).length;
-					const disabledCount = result.changes.size - enabledCount;
+					const enabledCount = Array.from(result.changes.values()).filter(v => v === "enabled").length;
+					const hiddenCount = Array.from(result.changes.values()).filter(v => v === "hidden").length;
+					const disabledCount = Array.from(result.changes.values()).filter(v => v === "disabled").length;
 					
 					const parts: string[] = [];
 					if (enabledCount > 0) parts.push(`${enabledCount} enabled`);
+					if (hiddenCount > 0) parts.push(`${hiddenCount} hidden`);
 					if (disabledCount > 0) parts.push(`${disabledCount} disabled`);
 					
 					ctx.ui.notify(`Skills updated: ${parts.join(", ")}. Use /reload or restart for changes to take effect.`, "success");
