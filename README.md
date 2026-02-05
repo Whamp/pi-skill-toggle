@@ -1,6 +1,8 @@
 # Pi Skill Toggle
 
-Enable/disable skills from loading into your pi context at startup. Helps reduce context pollution when you have many skills installed.
+I have a confession to make. I'm a skill hoarder. We moved from MCP servers polluting our context to now the irresistible urge to gather and hoard skills that then do the same once you gather enough of them. The problem is I'm afraid to remove them and forget that they exist, and it's a pain to re-enable them when needed for a specific use case. So I created this project inspired by [Pi Skill Palette](https://github.com/nicobailon/pi-skill-palette) that lets me enable and disable all the SKILLs I have without them disappearing from my visual memory, but still maintaining control over what gets pumped into my context.
+
+Full credit to [nicobailon](https://github.com/nicobailon) for pi-skill-palette which was the foundation of this. I just pointed my clanker at that project and basically said "make that project but have it toggle skills instead."
 
 ## Install
 
@@ -83,19 +85,6 @@ The extension discovers skills from:
 4. `~/.pi/agent/skills/` (recursive)
 5. `~/.pi/skills/` (recursive)
 6. `.pi/skills/` (project, recursive)
-
-## Comparison to pi-skill-palette
-
-| Feature | pi-skill-palette | pi-skill-toggle |
-|---------|-----------------|-----------------|
-| Purpose | Select skill to inject with next message | Enable/disable skills from loading |
-| Persistence | Session only | Persisted in settings.json |
-| Effect | Skill content sent with next prompt | Skill removed from context entirely |
-| When to use | "I want this skill now" | "I don't need this skill ever" |
-
-Use both together:
-- Use `/skills-toggle` to disable skills you rarely use
-- Use `/skill` to inject specific skills when needed
 
 ## License
 
