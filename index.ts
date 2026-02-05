@@ -24,18 +24,21 @@ import * as os from "node:os";
 // Types
 // ═══════════════════════════════════════════════════════════════════════════
 
+type DisableMode = "enabled" | "hidden" | "disabled";
+
 interface SkillInfo {
 	name: string;
 	description: string;
 	filePath: string;        // Primary path (first found, shown to user)
 	allPaths: string[];      // All paths with this name (for disabling all)
-	enabled: boolean;
+	mode: DisableMode;
+	disableModelInvocation: boolean;  // True if frontmatter has disable-model-invocation: true
 	hasDuplicates: boolean;  // True if multiple paths share this name
 }
 
 interface SkillToggleResult {
 	action: "toggle" | "cancel" | "apply";
-	changes: Map<string, boolean>; // skill name -> newEnabledState
+	changes: Map<string, DisableMode>; // skill name -> new mode
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -46,6 +49,7 @@ interface ToggleTheme {
 	border: string;
 	title: string;
 	enabled: string;
+	hidden: string;
 	disabled: string;
 	selected: string;
 	selectedText: string;
@@ -61,6 +65,7 @@ const DEFAULT_THEME: ToggleTheme = {
 	border: "2",           // dim
 	title: "2",            // dim
 	enabled: "32",         // green
+	hidden: "33",          // yellow
 	disabled: "31",        // red
 	selected: "36",        // cyan
 	selectedText: "36",    // cyan
@@ -197,26 +202,41 @@ function normalizeSettingsPath(entryPath: string): string {
  * Update settings to reflect enabled/disabled state changes.
  * When disabling a skill with duplicates, disables ALL paths.
  */
-function applyChanges(changes: Map<string, boolean>, skillsByName: Map<string, SkillInfo>): void {
+function applyChanges(changes: Map<string, DisableMode>, skillsByName: Map<string, SkillInfo>): void {
 	const settings = loadSettings();
 	const skills = settings.skills ?? [];
 	const newSkills: string[] = [];
 	
-	// Collect all paths that need to be disabled/enabled
-	const pathsToDisable = new Set<string>();
-	const pathsToEnable = new Set<string>();
+	// Collect paths that need settings.json changes
+	const pathsToDisable = new Set<string>();  // Add -path
+	const pathsToUndisable = new Set<string>(); // Remove -path
 	
-	for (const [skillName, newEnabled] of changes) {
+	// Collect skills that need frontmatter changes
+	const skillsToHide: SkillInfo[] = [];     // Add disable-model-invocation: true
+	const skillsToUnhide: SkillInfo[] = [];   // Remove disable-model-invocation
+	
+	for (const [skillName, newMode] of changes) {
 		const skill = skillsByName.get(skillName);
 		if (!skill) continue;
 		
-		// Apply change to ALL paths for this skill name
-		for (const filePath of skill.allPaths) {
-			if (newEnabled) {
-				pathsToEnable.add(filePath);
-			} else {
+		// Determine what changes are needed
+		if (newMode === "disabled") {
+			// Add -path to settings.json (leave frontmatter alone)
+			for (const filePath of skill.allPaths) {
 				pathsToDisable.add(filePath);
 			}
+		} else if (newMode === "hidden") {
+			// Remove -path from settings.json, add disable-model-invocation to frontmatter
+			for (const filePath of skill.allPaths) {
+				pathsToUndisable.add(filePath);
+			}
+			skillsToHide.push(skill);
+		} else {
+			// enabled: Remove -path from settings.json, remove disable-model-invocation from frontmatter
+			for (const filePath of skill.allPaths) {
+				pathsToUndisable.add(filePath);
+			}
+			skillsToUnhide.push(skill);
 		}
 	}
 	
@@ -233,7 +253,7 @@ function applyChanges(changes: Map<string, boolean>, skillsByName: Map<string, S
 		return false;
 	};
 	
-	// Keep non-disable entries and entries not being changed
+	// Keep non-disable entries and entries not being un-disabled
 	for (const entry of skills) {
 		if (typeof entry !== "string") {
 			newSkills.push(entry);
@@ -245,8 +265,8 @@ function applyChanges(changes: Map<string, boolean>, skillsByName: Map<string, S
 			continue;
 		}
 		
-		// This is a disable entry - check if it's being enabled
-		if (matchesPath(entry, pathsToEnable)) {
+		// This is a disable entry - check if it's being removed
+		if (matchesPath(entry, pathsToUndisable)) {
 			// Skip it (remove from settings)
 			continue;
 		}
@@ -274,6 +294,25 @@ function applyChanges(changes: Map<string, boolean>, skillsByName: Map<string, S
 	
 	settings.skills = newSkills;
 	saveSettings(settings);
+	
+	// Update frontmatter for hidden skills
+	for (const skill of skillsToHide) {
+		try {
+			updateSkillFrontmatter(skill.filePath, true);
+		} catch (error) {
+			// Log but continue - don't fail the whole operation
+			console.error(`Failed to update frontmatter for ${skill.name}: ${error}`);
+		}
+	}
+	
+	// Update frontmatter for un-hidden skills
+	for (const skill of skillsToUnhide) {
+		try {
+			updateSkillFrontmatter(skill.filePath, false);
+		} catch (error) {
+			console.error(`Failed to update frontmatter for ${skill.name}: ${error}`);
+		}
+	}
 }
 
 function normalizePath(p: string): string {
@@ -300,6 +339,7 @@ interface RawSkill {
 	description: string;
 	filePath: string;
 	realPath: string;
+	disableModelInvocation: boolean;
 }
 
 /**
@@ -381,7 +421,7 @@ function loadRawSkill(filePath: string, skills: RawSkill[], visitedRealPaths: Se
 		const content = fs.readFileSync(filePath, "utf-8");
 		const skillDir = path.dirname(filePath);
 		const parentDirName = path.basename(skillDir);
-		const { name, description } = parseFrontmatter(content, parentDirName);
+		const { name, description, disableModelInvocation } = parseFrontmatter(content, parentDirName);
 		
 		if (!description) return;
 		
@@ -390,25 +430,27 @@ function loadRawSkill(filePath: string, skills: RawSkill[], visitedRealPaths: Se
 			description,
 			filePath,
 			realPath,
+			disableModelInvocation,
 		});
 	} catch {
 		// Skip invalid skill files
 	}
 }
 
-function parseFrontmatter(content: string, fallbackName: string): { name: string; description: string } {
+function parseFrontmatter(content: string, fallbackName: string): { name: string; description: string; disableModelInvocation: boolean } {
 	if (!content.startsWith("---")) {
-		return { name: fallbackName, description: "" };
+		return { name: fallbackName, description: "", disableModelInvocation: false };
 	}
 
 	const endIndex = content.indexOf("\n---", 3);
 	if (endIndex === -1) {
-		return { name: fallbackName, description: "" };
+		return { name: fallbackName, description: "", disableModelInvocation: false };
 	}
 
 	const frontmatter = content.slice(4, endIndex);
 	let name = fallbackName;
 	let description = "";
+	let disableModelInvocation = false;
 
 	for (const line of frontmatter.split("\n")) {
 		const colonIndex = line.indexOf(":");
@@ -419,9 +461,108 @@ function parseFrontmatter(content: string, fallbackName: string): { name: string
 
 		if (key === "name") name = value;
 		if (key === "description") description = value;
+		if (key === "disable-model-invocation") {
+			disableModelInvocation = value.toLowerCase() === "true";
+		}
 	}
 
-	return { name, description };
+	return { name, description, disableModelInvocation };
+}
+
+/**
+ * Set or update a frontmatter field in a SKILL.md file.
+ * Creates frontmatter block if it doesn't exist.
+ */
+function setFrontmatterField(content: string, key: string, value: string): string {
+	if (!content.startsWith("---")) {
+		// No frontmatter, add it
+		return `---\n${key}: ${value}\n---\n${content}`;
+	}
+
+	const endIndex = content.indexOf("\n---", 3);
+	if (endIndex === -1) {
+		// Malformed frontmatter, add key at start
+		return `---\n${key}: ${value}\n---\n${content}`;
+	}
+
+	const frontmatter = content.slice(4, endIndex);
+	const rest = content.slice(endIndex + 4);
+	const lines = frontmatter.split("\n");
+	
+	// Check if key already exists
+	let found = false;
+	for (let i = 0; i < lines.length; i++) {
+		const colonIndex = lines[i].indexOf(":");
+		if (colonIndex === -1) continue;
+		const lineKey = lines[i].slice(0, colonIndex).trim();
+		if (lineKey === key) {
+			lines[i] = `${key}: ${value}`;
+			found = true;
+			break;
+		}
+	}
+	
+	if (!found) {
+		lines.push(`${key}: ${value}`);
+	}
+	
+	return `---\n${lines.join("\n")}\n---${rest}`;
+}
+
+/**
+ * Remove a frontmatter field from a SKILL.md file.
+ */
+function removeFrontmatterField(content: string, key: string): string {
+	if (!content.startsWith("---")) {
+		return content; // No frontmatter
+	}
+
+	const endIndex = content.indexOf("\n---", 3);
+	if (endIndex === -1) {
+		return content; // Malformed
+	}
+
+	const frontmatter = content.slice(4, endIndex);
+	const rest = content.slice(endIndex + 4);
+	const lines = frontmatter.split("\n");
+	
+	const filteredLines = lines.filter(line => {
+		const colonIndex = line.indexOf(":");
+		if (colonIndex === -1) return true;
+		const lineKey = line.slice(0, colonIndex).trim();
+		return lineKey !== key;
+	});
+	
+	// If frontmatter is now empty, we could remove it, but safer to keep structure
+	return `---\n${filteredLines.join("\n")}\n---${rest}`;
+}
+
+/**
+ * Update a SKILL.md file's disable-model-invocation field.
+ * Creates backup before modifying.
+ */
+function updateSkillFrontmatter(filePath: string, disableModelInvocation: boolean): void {
+	const content = fs.readFileSync(filePath, "utf-8");
+	
+	// Create backup
+	const backupPath = filePath + ".bak";
+	fs.writeFileSync(backupPath, content);
+	
+	let newContent: string;
+	if (disableModelInvocation) {
+		newContent = setFrontmatterField(content, "disable-model-invocation", "true");
+	} else {
+		newContent = removeFrontmatterField(content, "disable-model-invocation");
+	}
+	
+	fs.writeFileSync(filePath, newContent);
+	
+	// Remove backup on success
+	try {
+		fs.unlinkSync(backupPath);
+	} catch {
+		// Ignore
+	}
 }
 
 /**
@@ -463,23 +604,28 @@ function loadAllSkills(): { skills: SkillInfo[]; byName: Map<string, SkillInfo> 
 				description: raw.description,
 				filePath: raw.filePath,
 				allPaths: [], // Will be filled after grouping
-				enabled: true, // Will be computed after grouping
+				mode: "enabled", // Will be computed after grouping
+				disableModelInvocation: raw.disableModelInvocation,
 				hasDuplicates: false, // Will be computed after grouping
 			});
 		}
 	}
 	
-	// Now fill in allPaths and compute enabled state
+	// Now fill in allPaths and compute mode
 	for (const [name, skill] of byName) {
 		const allPaths = pathsByName.get(name) ?? [skill.filePath];
 		skill.allPaths = allPaths;
 		skill.hasDuplicates = allPaths.length > 1;
 		
-		// Skill is enabled if ANY of its paths is enabled
-		// (if user disabled one path but not others, the skill is still partially enabled)
-		// Actually, to match pi's behavior: if the PRIMARY path is disabled, consider it disabled
-		// But for safety, we should check if ALL paths are disabled
-		skill.enabled = !allPaths.every(p => isSkillDisabled(p, disabledPaths));
+		// Compute mode: disabled > hidden > enabled
+		const isDisabled = allPaths.every(p => isSkillDisabled(p, disabledPaths));
+		if (isDisabled) {
+			skill.mode = "disabled";
+		} else if (skill.disableModelInvocation) {
+			skill.mode = "hidden";
+		} else {
+			skill.mode = "enabled";
+		}
 	}
 
 	const skills = Array.from(byName.values()).sort((a, b) => a.name.localeCompare(b.name));
@@ -541,7 +687,7 @@ class SkillToggleComponent {
 	private filtered: SkillInfo[];
 	private selected = 0;
 	private query = "";
-	private changes = new Map<string, boolean>(); // skill NAME -> newEnabledState
+	private changes = new Map<string, DisableMode>(); // skill NAME -> new mode
 	private inactivityTimeout: ReturnType<typeof setTimeout> | null = null;
 	private static readonly INACTIVITY_MS = 120000; // 2 minutes
 
@@ -562,11 +708,11 @@ class SkillToggleComponent {
 		}, SkillToggleComponent.INACTIVITY_MS);
 	}
 
-	private getEffectiveEnabled(skill: SkillInfo): boolean {
+	private getEffectiveMode(skill: SkillInfo): DisableMode {
 		if (this.changes.has(skill.name)) {
 			return this.changes.get(skill.name)!;
 		}
-		return skill.enabled;
+		return skill.mode;
 	}
 
 	handleInput(data: string): void {
@@ -578,36 +724,38 @@ class SkillToggleComponent {
 			return;
 		}
 
-		// Enter on a skill toggles it
-		if (matchesKey(data, "return")) {
+		// Enter/Space toggles between enabled <-> hidden (default action)
+		if (matchesKey(data, "return") || data === " ") {
 			const skill = this.filtered[this.selected];
 			if (skill) {
-				const currentEnabled = this.getEffectiveEnabled(skill);
-				const originalEnabled = skill.enabled;
-				const newEnabled = !currentEnabled;
+				const currentMode = this.getEffectiveMode(skill);
+				const originalMode = skill.mode;
+				// Toggle: enabled <-> hidden, disabled -> enabled
+				const newMode: DisableMode = currentMode === "enabled" ? "hidden" : "enabled";
 				
 				// If toggling back to original state, remove from changes
-				if (newEnabled === originalEnabled) {
+				if (newMode === originalMode) {
 					this.changes.delete(skill.name);
 				} else {
-					this.changes.set(skill.name, newEnabled);
+					this.changes.set(skill.name, newMode);
 				}
 			}
 			return;
 		}
 
-		// Space also toggles
-		if (data === " ") {
+		// 'd' or Ctrl+D toggles full disable (enabled/hidden <-> disabled)
+		if (data === "d" || matchesKey(data, "ctrl+d")) {
 			const skill = this.filtered[this.selected];
 			if (skill) {
-				const currentEnabled = this.getEffectiveEnabled(skill);
-				const originalEnabled = skill.enabled;
-				const newEnabled = !currentEnabled;
+				const currentMode = this.getEffectiveMode(skill);
+				const originalMode = skill.mode;
+				// Toggle: disabled <-> enabled
+				const newMode: DisableMode = currentMode === "disabled" ? "enabled" : "disabled";
 				
-				if (newEnabled === originalEnabled) {
+				if (newMode === originalMode) {
 					this.changes.delete(skill.name);
 				} else {
-					this.changes.set(skill.name, newEnabled);
+					this.changes.set(skill.name, newMode);
 				}
 			}
 			return;
@@ -681,11 +829,13 @@ class SkillToggleComponent {
 
 		// Count pending changes
 		const pendingCount = this.changes.size;
-		const enabledCount = this.allSkills.filter(s => this.getEffectiveEnabled(s)).length;
+		const enabledCount = this.allSkills.filter(s => this.getEffectiveMode(s) === "enabled").length;
+		const hiddenCount = this.allSkills.filter(s => this.getEffectiveMode(s) === "hidden").length;
+		const disabledCount = this.allSkills.filter(s => this.getEffectiveMode(s) === "disabled").length;
 		const totalCount = this.allSkills.length;
 
 		// Top border with title
-		const titleText = ` Skills (${enabledCount}/${totalCount} enabled) `;
+		const titleText = ` Skills (${enabledCount} on, ${hiddenCount} hidden, ${disabledCount} off) `;
 		const borderLen = innerW - visLen(titleText);
 		const leftBorder = Math.floor(borderLen / 2);
 		const rightBorder = borderLen - leftBorder;
@@ -726,12 +876,19 @@ class SkillToggleComponent {
 			for (let i = startIndex; i < endIndex; i++) {
 				const skill = this.filtered[i];
 				const isSelected = i === this.selected;
-				const isEnabled = this.getEffectiveEnabled(skill);
+				const mode = this.getEffectiveMode(skill);
 				const hasChanged = this.changes.has(skill.name);
 				
-				// Build the skill line
+				// Build the skill line - icons: ● enabled, ◐ hidden, ○ disabled
 				const prefix = isSelected ? selected("▸") : border("·");
-				const statusIcon = isEnabled ? enabled("●") : disabled("○");
+				let statusIcon: string;
+				if (mode === "enabled") {
+					statusIcon = enabled("●");
+				} else if (mode === "hidden") {
+					statusIcon = fg(t.hidden, "◐");
+				} else {
+					statusIcon = disabled("○");
+				}
 				const changedMarker = hasChanged ? changed("*") : " ";
 				const dupMarker = skill.hasDuplicates ? duplicate("²") : " ";
 				const nameStr = isSelected ? bold(selectedText(skill.name)) : skill.name;
@@ -758,11 +915,11 @@ class SkillToggleComponent {
 		lines.push(emptyRow());
 
 		// Footer hints
-		const baseHints = `${italic("↑↓")} navigate  ${italic("enter/space")} toggle  ${italic("ctrl+s")} save  ${italic("esc")} cancel`;
+		const baseHints = `${italic("↑↓")} navigate  ${italic("enter/space")} hide  ${italic("d")} disable  ${italic("ctrl+s")} save  ${italic("esc")} cancel`;
 		lines.push(row(hint(baseHints)));
 		
 		// Legend for markers
-		lines.push(row(hint(`${duplicate("²")} = multiple sources (all will be toggled)`)));
+		lines.push(row(hint(`${enabled("●")} on  ${fg(t.hidden, "◐")} hidden (manual only)  ${disabled("○")} disabled  ${duplicate("²")} duplicates`)));
 
 		// Bottom border
 		lines.push(border(`╰${"─".repeat(innerW)}╯`));

@@ -2,6 +2,7 @@
   "border": "2",
   "title": "2",
   "enabled": "32",
+  "hidden": "33",
   "disabled": "31",
   "selected": "36",
   "selectedText": "36",
@@ -9,5 +10,6 @@
   "placeholder": "2;3",
   "description": "2",
   "hint": "2",
-  "changed": "33"
+  "changed": "33",
+  "duplicate": "35"
 }
