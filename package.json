@@ -1,0 +1,28 @@
+{
+  "name": "pi-skill-toggle",
+  "version": "1.0.0",
+  "description": "Enable/disable skills from loading into pi context at startup",
+  "main": "index.ts",
+  "keywords": [
+    "pi-package"
+  ],
+  "author": "Will Hampson",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Whamp/pi-skill-toggle.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Whamp/pi-skill-toggle/issues"
+  },
+  "homepage": "https://github.com/Whamp/pi-skill-toggle#readme",
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-tui": "*"
+  }
+}
