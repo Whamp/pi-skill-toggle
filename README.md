@@ -7,6 +7,12 @@ Full credit to [nicobailon](https://github.com/nicobailon) for pi-skill-palette 
 ## Install
 
 ```bash
+pi install npm:pi-skill-toggle
+```
+
+Or from git:
+
+```bash
 pi install git:github.com/Whamp/pi-skill-toggle
 ```
 
