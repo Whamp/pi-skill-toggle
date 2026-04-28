@@ -581,6 +581,7 @@ function loadAllSkills(): { skills: SkillInfo[]; byName: Map<string, SkillInfo> 
 		{ dir: path.join(os.homedir(), ".pi", "agent", "skills"), format: "recursive" },
 		{ dir: path.join(os.homedir(), ".pi", "skills"), format: "recursive" },
 		{ dir: path.join(process.cwd(), ".pi", "skills"), format: "recursive" },
+		{ dir: path.join(os.homedir(), ".agents", "skills"), format: "recursive" },
 	];
 
 	for (const { dir, format } of skillDirs) {

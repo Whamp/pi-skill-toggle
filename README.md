@@ -111,6 +111,7 @@ The extension discovers skills from:
 4. `~/.pi/agent/skills/` (recursive)
 5. `~/.pi/skills/` (recursive)
 6. `.pi/skills/` (project, recursive)
+7. `~/.agents/skills/` (recursive)
 
 ## License
 
