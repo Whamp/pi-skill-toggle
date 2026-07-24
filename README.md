@@ -29,6 +29,7 @@ This opens an interactive overlay where you can:
 - **Filter** by typing
 - **Enter/Space** - Toggle between enabled ↔ hidden
 - **d** - Toggle full disable (enabled ↔ disabled)
+- **Ctrl+F** - Open directory settings (choose which folders are scanned)
 - **Ctrl+S** - Save changes
 - **Esc** - Cancel
 
@@ -104,7 +105,8 @@ Values are ANSI SGR codes (e.g., `"36"` for cyan, `"2;3"` for dim+italic).
 
 ## Skill Locations Scanned
 
-The extension discovers skills from:
+The extension discovers skills from these locations (in priority order — first skill with a given name wins):
+
 1. `~/.codex/skills/` (recursive)
 2. `~/.claude/skills/` (one level deep)
 3. `.claude/skills/` (project, one level deep)
@@ -112,6 +114,33 @@ The extension discovers skills from:
 5. `~/.pi/skills/` (recursive)
 6. `.pi/skills/` (project, recursive)
 7. `~/.agents/skills/` (recursive)
+
+All locations are scanned by default. This aggregates skills across harnesses (Codex, Claude Code, pi), which is handy — but it also means the toggle window can show skills, statuses and `²` duplicates for directories that **pi itself does not load** (pi only loads `~/.pi/agent/skills`, `~/.agents/skills` and package skills). If a skill exists as separate physical copies in several harness folders, the picker reads the first one in scan order, which may not be the copy pi actually loads.
+
+### Directory Settings
+
+Press **Ctrl+F** in the toggle window to open the directory settings overlay. There you can switch each scan location on/off:
+
+- **Enter/Space** - toggle the selected directory
+- **Ctrl+S** - save
+- **Esc** - back to the skill list
+
+Disabling the non-pi locations (e.g. `~/.codex/skills`, `~/.claude/skills`) makes the toggle window reflect exactly what pi loads, and removes cross-harness `²` duplicates. Your choices are persisted to `~/.pi/agent/extensions/skill-toggle/dirs.json`:
+
+```json
+{
+  "disabled": ["codex", "claude", "claude-project"]
+}
+```
+
+Removing the file (or emptying `disabled`) restores the default of scanning every location.
+
+## Development
+
+```bash
+npm install       # installs dev-only type packages
+npm run typecheck # tsc --noEmit against the pi API types
+```
 
 ## License
 
