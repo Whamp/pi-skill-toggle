@@ -37,8 +37,13 @@ interface SkillInfo {
 }
 
 interface SkillToggleResult {
-	action: "toggle" | "cancel" | "apply";
+	action: "toggle" | "cancel" | "apply" | "open-dirs";
 	changes: Map<string, DisableMode>; // skill name -> new mode
+}
+
+interface DirSettingsResult {
+	action: "back";     // returns to the skill overlay; saving happens inline on ctrl+s
+	changed: boolean;   // whether the enabled set was modified and saved
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -334,6 +339,77 @@ interface SkillDirConfig {
 	format: SkillFormat;
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Scan Directory Configuration
+// ═══════════════════════════════════════════════════════════════════════════
+
+interface SkillDirDef {
+	id: string;                 // stable id used in the config file
+	label: string;              // display label, e.g. "~/.codex/skills"
+	scope: "global" | "project";
+	format: SkillFormat;
+	resolve: () => string;      // resolved absolute path
+}
+
+// Default scan locations, in priority order (first occurrence of a name wins).
+// All enabled by default for backward compatibility.
+const DEFAULT_SKILL_DIRS: SkillDirDef[] = [
+	{ id: "codex",          label: "~/.codex/skills",    scope: "global",  format: "recursive", resolve: () => path.join(os.homedir(), ".codex", "skills") },
+	{ id: "claude",         label: "~/.claude/skills",   scope: "global",  format: "claude",    resolve: () => path.join(os.homedir(), ".claude", "skills") },
+	{ id: "claude-project", label: ".claude/skills",     scope: "project", format: "claude",    resolve: () => path.join(process.cwd(), ".claude", "skills") },
+	{ id: "pi-agent",       label: "~/.pi/agent/skills", scope: "global",  format: "recursive", resolve: () => path.join(os.homedir(), ".pi", "agent", "skills") },
+	{ id: "pi-home",        label: "~/.pi/skills",       scope: "global",  format: "recursive", resolve: () => path.join(os.homedir(), ".pi", "skills") },
+	{ id: "pi-project",     label: ".pi/skills",         scope: "project", format: "recursive", resolve: () => path.join(process.cwd(), ".pi", "skills") },
+	{ id: "agents",         label: "~/.agents/skills",   scope: "global",  format: "recursive", resolve: () => path.join(os.homedir(), ".agents", "skills") },
+];
+
+const DIR_CONFIG_PATH = path.join(os.homedir(), ".pi", "agent", "extensions", "skill-toggle", "dirs.json");
+
+interface DirConfig {
+	disabled: string[];         // ids of directories to skip scanning
+}
+
+function loadDirConfig(): DirConfig {
+	try {
+		if (fs.existsSync(DIR_CONFIG_PATH)) {
+			const parsed = JSON.parse(fs.readFileSync(DIR_CONFIG_PATH, "utf-8")) as Partial<DirConfig>;
+			if (Array.isArray(parsed.disabled)) {
+				return { disabled: parsed.disabled.filter((x): x is string => typeof x === "string") };
+			}
+		}
+	} catch {
+		// Ignore errors, use default (all enabled)
+	}
+	return { disabled: [] };
+}
+
+function saveDirConfig(config: DirConfig): void {
+	const dir = path.dirname(DIR_CONFIG_PATH);
+	fs.mkdirSync(dir, { recursive: true });
+	fs.writeFileSync(DIR_CONFIG_PATH, JSON.stringify(config, null, 2));
+}
+
+/** A scan location with resolved path + enabled/exists state, for scanning and the settings UI. */
+interface ScanDir {
+	def: SkillDirDef;
+	dir: string;                // resolved absolute path
+	enabled: boolean;
+	exists: boolean;
+}
+
+function getScanDirs(): ScanDir[] {
+	const disabled = new Set(loadDirConfig().disabled);
+	return DEFAULT_SKILL_DIRS.map((def) => {
+		const dir = def.resolve();
+		return {
+			def,
+			dir,
+			enabled: !disabled.has(def.id),
+			exists: fs.existsSync(dir),
+		};
+	});
+}
+
 interface RawSkill {
 	name: string;
 	description: string;
@@ -574,18 +650,10 @@ function loadAllSkills(): { skills: SkillInfo[]; byName: Map<string, SkillInfo> 
 	const rawSkills: RawSkill[] = [];
 	const visitedRealPaths = new Set<string>();
 	
-	const skillDirs: SkillDirConfig[] = [
-		{ dir: path.join(os.homedir(), ".codex", "skills"), format: "recursive" },
-		{ dir: path.join(os.homedir(), ".claude", "skills"), format: "claude" },
-		{ dir: path.join(process.cwd(), ".claude", "skills"), format: "claude" },
-		{ dir: path.join(os.homedir(), ".pi", "agent", "skills"), format: "recursive" },
-		{ dir: path.join(os.homedir(), ".pi", "skills"), format: "recursive" },
-		{ dir: path.join(process.cwd(), ".pi", "skills"), format: "recursive" },
-		{ dir: path.join(os.homedir(), ".agents", "skills"), format: "recursive" },
-	];
-
-	for (const { dir, format } of skillDirs) {
-		scanSkillDir(dir, format, rawSkills, visitedRealPaths);
+	// Scan only enabled directories (configurable via the directory settings overlay).
+	for (const { dir, def, enabled } of getScanDirs()) {
+		if (!enabled) continue;
+		scanSkillDir(dir, def.format, rawSkills, visitedRealPaths);
 	}
 
 	// Group by name, first occurrence wins (matches pi's behavior)
@@ -694,10 +762,12 @@ class SkillToggleComponent {
 
 	constructor(
 		skills: SkillInfo[],
-		private done: (result: SkillToggleResult) => void
+		private done: (result: SkillToggleResult) => void,
+		initialChanges?: Map<string, DisableMode>
 	) {
 		this.allSkills = skills;
 		this.filtered = skills;
+		if (initialChanges) this.changes = new Map(initialChanges);
 		this.resetInactivityTimeout();
 	}
 
@@ -766,6 +836,13 @@ class SkillToggleComponent {
 		if (matchesKey(data, "ctrl+s")) {
 			this.cleanup();
 			this.done({ action: "apply", changes: this.changes });
+			return;
+		}
+
+		// Ctrl+F opens the directory settings overlay (pending changes preserved)
+		if (matchesKey(data, "ctrl+f")) {
+			this.cleanup();
+			this.done({ action: "open-dirs", changes: this.changes });
 			return;
 		}
 
@@ -916,7 +993,7 @@ class SkillToggleComponent {
 		lines.push(emptyRow());
 
 		// Footer hints
-		const baseHints = `${italic("↑↓")} navigate  ${italic("enter/space")} hide  ${italic("d")} disable  ${italic("ctrl+s")} save  ${italic("esc")} cancel`;
+		const baseHints = `${italic("↑↓")} navigate  ${italic("enter/space")} hide  ${italic("d")} disable  ${italic("ctrl+f")} dirs  ${italic("ctrl+s")} save  ${italic("esc")} cancel`;
 		lines.push(row(hint(baseHints)));
 		
 		// Legend for markers
@@ -943,6 +1020,187 @@ class SkillToggleComponent {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Directory Settings UI
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** Count skills discoverable in a single directory (independent of global dedup). */
+function countSkillsInDir(scanDir: ScanDir): number {
+	if (!scanDir.exists) return 0;
+	const raw: RawSkill[] = [];
+	scanSkillDir(scanDir.dir, scanDir.def.format, raw, new Set<string>());
+	return raw.length;
+}
+
+interface DirRow {
+	def: SkillDirDef;
+	dir: string;
+	exists: boolean;
+	count: number;
+	enabled: boolean;   // effective state (pending edits applied)
+	original: boolean;  // state on entry, to detect changes
+}
+
+class DirSettingsComponent {
+	private rows: DirRow[];
+	private selected = 0;
+	private inactivityTimeout: ReturnType<typeof setTimeout> | null = null;
+	private static readonly INACTIVITY_MS = 120000; // 2 minutes
+
+	constructor(private done: (result: DirSettingsResult) => void) {
+		this.rows = getScanDirs().map((s) => ({
+			def: s.def,
+			dir: s.dir,
+			exists: s.exists,
+			count: countSkillsInDir(s),
+			enabled: s.enabled,
+			original: s.enabled,
+		}));
+		this.resetInactivityTimeout();
+	}
+
+	private resetInactivityTimeout(): void {
+		if (this.inactivityTimeout) clearTimeout(this.inactivityTimeout);
+		this.inactivityTimeout = setTimeout(() => {
+			this.cleanup();
+			this.done({ action: "back", changed: false });
+		}, DirSettingsComponent.INACTIVITY_MS);
+	}
+
+	private hasPending(): boolean {
+		return this.rows.some((r) => r.enabled !== r.original);
+	}
+
+	private save(): void {
+		const disabled = this.rows.filter((r) => !r.enabled).map((r) => r.def.id);
+		saveDirConfig({ disabled });
+	}
+
+	handleInput(data: string): void {
+		this.resetInactivityTimeout();
+
+		if (matchesKey(data, "escape")) {
+			this.cleanup();
+			this.done({ action: "back", changed: false });
+			return;
+		}
+
+		if (matchesKey(data, "return") || data === " ") {
+			const r = this.rows[this.selected];
+			if (r) r.enabled = !r.enabled;
+			return;
+		}
+
+		if (matchesKey(data, "ctrl+s")) {
+			const changed = this.hasPending();
+			if (changed) this.save();
+			this.cleanup();
+			this.done({ action: "back", changed });
+			return;
+		}
+
+		if (matchesKey(data, "up")) {
+			if (this.rows.length > 0) {
+				this.selected = this.selected === 0 ? this.rows.length - 1 : this.selected - 1;
+			}
+			return;
+		}
+
+		if (matchesKey(data, "down")) {
+			if (this.rows.length > 0) {
+				this.selected = this.selected === this.rows.length - 1 ? 0 : this.selected + 1;
+			}
+			return;
+		}
+	}
+
+	render(width: number): string[] {
+		const innerW = width - 2;
+		const lines: string[] = [];
+
+		const t = toggleTheme;
+		const border = (s: string) => fg(t.border, s);
+		const title = (s: string) => fg(t.title, s);
+		const enabled = (s: string) => fg(t.enabled, s);
+		const disabled = (s: string) => fg(t.disabled, s);
+		const selected = (s: string) => fg(t.selected, s);
+		const selectedText = (s: string) => fg(t.selectedText, s);
+		const description = (s: string) => fg(t.description, s);
+		const hint = (s: string) => fg(t.hint, s);
+		const changed = (s: string) => fg(t.changed, s);
+		const bold = (s: string) => `\x1b[1m${s}\x1b[22m`;
+		const italic = (s: string) => `\x1b[3m${s}\x1b[23m`;
+
+		const visLen = visibleWidth;
+		const row = (content: string) => border("│") + truncateToWidth(" " + content, innerW, "…", true) + border("│");
+		const emptyRow = () => border("│") + " ".repeat(innerW) + border("│");
+
+		const onCount = this.rows.filter((r) => r.enabled).length;
+		const offCount = this.rows.length - onCount;
+
+		const titleText = ` Skill Directories (${onCount} on, ${offCount} off) `;
+		const borderLen = innerW - visLen(titleText);
+		const leftBorder = Math.floor(borderLen / 2);
+		const rightBorder = borderLen - leftBorder;
+		lines.push(border("╭" + "─".repeat(leftBorder)) + title(titleText) + border("─".repeat(rightBorder) + "╮"));
+
+		lines.push(emptyRow());
+		lines.push(row(hint(italic("Directories scanned for skills. Disable to match what pi actually loads."))));
+		lines.push(emptyRow());
+		lines.push(border("├" + "─".repeat(innerW) + "┤"));
+		lines.push(emptyRow());
+
+		for (let i = 0; i < this.rows.length; i++) {
+			const r = this.rows[i];
+			const isSelected = i === this.selected;
+			const hasChanged = r.enabled !== r.original;
+
+			const prefix = isSelected ? selected("▸") : border("·");
+			const statusIcon = r.enabled ? enabled("●") : disabled("○");
+			const changedMarker = hasChanged ? changed("*") : " ";
+			const labelStr = isSelected ? bold(selectedText(r.def.label)) : r.def.label;
+
+			let meta: string;
+			if (!r.exists) {
+				meta = description(italic("(missing)"));
+			} else {
+				meta = description(`${r.count} skill${r.count === 1 ? "" : "s"} · ${r.def.scope}`);
+			}
+			const separator = `  ${border("—")}  `;
+			lines.push(row(`${prefix} ${statusIcon}${changedMarker} ${labelStr}${separator}${meta}`));
+		}
+
+		lines.push(emptyRow());
+		lines.push(border("├" + "─".repeat(innerW) + "┤"));
+		lines.push(emptyRow());
+
+		if (this.hasPending()) {
+			lines.push(row(changed("⚠ unsaved changes (Ctrl+S to save, applies on next reload)")));
+			lines.push(emptyRow());
+		}
+
+		const hints = `${italic("↑↓")} navigate  ${italic("enter/space")} toggle  ${italic("ctrl+s")} save  ${italic("esc")} back`;
+		lines.push(row(hint(hints)));
+		lines.push(row(hint(`${enabled("●")} scanned  ${disabled("○")} skipped`)));
+		lines.push(border(`╰${"─".repeat(innerW)}╯`));
+
+		return lines;
+	}
+
+	private cleanup(): void {
+		if (this.inactivityTimeout) {
+			clearTimeout(this.inactivityTimeout);
+			this.inactivityTimeout = null;
+		}
+	}
+
+	invalidate(): void {}
+
+	dispose(): void {
+		this.cleanup();
+	}
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Extension Entry Point
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -951,41 +1209,62 @@ export default function skillToggleExtension(pi: ExtensionAPI): void {
 	pi.registerCommand("skills-toggle", {
 		description: "Toggle skills on/off (changes require restart)",
 		handler: async (_args: string, ctx: ExtensionContext) => {
-			const { skills, byName } = loadAllSkills();
+			let loaded = loadAllSkills();
 
-			if (skills.length === 0) {
+			if (loaded.skills.length === 0) {
 				ctx.ui.notify("No skills found", "warning");
 				return;
 			}
 
-			const result = await ctx.ui.custom<SkillToggleResult>(
-				(_tui, _theme, _keybindings, done) => new SkillToggleComponent(
-					skills,
-					(r) => done(r)
-				),
-				{ overlay: true, overlayOptions: { anchor: "center", width: 80 } }
-			);
+			// Pending skill changes are preserved across visits to the directory overlay.
+			let pending = new Map<string, DisableMode>();
 
-			if (result.action === "apply" && result.changes.size > 0) {
-				try {
-					applyChanges(result.changes, byName);
-					
-					const enabledCount = Array.from(result.changes.values()).filter(v => v === "enabled").length;
-					const hiddenCount = Array.from(result.changes.values()).filter(v => v === "hidden").length;
-					const disabledCount = Array.from(result.changes.values()).filter(v => v === "disabled").length;
-					
-					const parts: string[] = [];
-					if (enabledCount > 0) parts.push(`${enabledCount} enabled`);
-					if (hiddenCount > 0) parts.push(`${hiddenCount} hidden`);
-					if (disabledCount > 0) parts.push(`${disabledCount} disabled`);
-					
-					ctx.ui.notify(`Skills updated: ${parts.join(", ")}. Use /reload or restart for changes to take effect.`, "success");
-				} catch (error) {
-					const msg = error instanceof Error ? error.message : "Unknown error";
-					ctx.ui.notify(`Failed to save settings: ${msg}`, "error");
+			while (true) {
+				const result = await ctx.ui.custom<SkillToggleResult>(
+					(_tui, _theme, _keybindings, done) => new SkillToggleComponent(
+						loaded.skills,
+						(r) => done(r),
+						pending
+					),
+					{ overlay: true, overlayOptions: { anchor: "center", width: 80 } }
+				);
+
+				if (result.action === "open-dirs") {
+					pending = result.changes;
+					const dirResult = await ctx.ui.custom<DirSettingsResult>(
+						(_tui, _theme, _keybindings, done) => new DirSettingsComponent((r) => done(r)),
+						{ overlay: true, overlayOptions: { anchor: "center", width: 80 } }
+					);
+					if (dirResult.changed) {
+						// Re-scan with the new directory config and drop pending edits for skills that vanished.
+						loaded = loadAllSkills();
+						for (const name of Array.from(pending.keys())) {
+							if (!loaded.byName.has(name)) pending.delete(name);
+						}
+					}
+					continue;
 				}
-			} else if (result.action === "cancel") {
-				// Silent cancel
+
+				if (result.action === "apply" && result.changes.size > 0) {
+					try {
+						applyChanges(result.changes, loaded.byName);
+
+						const enabledCount = Array.from(result.changes.values()).filter(v => v === "enabled").length;
+						const hiddenCount = Array.from(result.changes.values()).filter(v => v === "hidden").length;
+						const disabledCount = Array.from(result.changes.values()).filter(v => v === "disabled").length;
+
+						const parts: string[] = [];
+						if (enabledCount > 0) parts.push(`${enabledCount} enabled`);
+						if (hiddenCount > 0) parts.push(`${hiddenCount} hidden`);
+						if (disabledCount > 0) parts.push(`${disabledCount} disabled`);
+
+						ctx.ui.notify(`Skills updated: ${parts.join(", ")}. Use /reload or restart for changes to take effect.`, "info");
+					} catch (error) {
+						const msg = error instanceof Error ? error.message : "Unknown error";
+						ctx.ui.notify(`Failed to save settings: ${msg}`, "error");
+					}
+				}
+				break;
 			}
 		},
 	});
