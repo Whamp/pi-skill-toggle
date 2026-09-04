@@ -102,7 +102,28 @@ const toggleTheme = loadTheme();
 // Settings Management
 // ═══════════════════════════════════════════════════════════════════════════
 
-const SETTINGS_PATH = path.join(os.homedir(), ".pi", "agent", "settings.json");
+
+// Host detection: oh-my-pi (omp) vs plain pi. omp honors PI_CODING_AGENT_DIR /
+// PI_CONFIG_DIR / OMP_PROFILE; its default agent dir is ~/.omp/agent.
+const OMP_CONFIG_ROOT = path.join(os.homedir(), process.env.PI_CONFIG_DIR ?? ".omp");
+const ompProfile = process.env.OMP_PROFILE;
+const OMP_AGENT_DIR = process.env.PI_CODING_AGENT_DIR
+	?? (ompProfile && ompProfile.trim() !== "" && ompProfile !== "default"
+		? path.join(OMP_CONFIG_ROOT, "profiles", ompProfile, "agent")
+		: path.join(OMP_CONFIG_ROOT, "agent"));
+const PI_AGENT_DIR = path.join(os.homedir(), ".pi", "agent");
+
+function detectOmp(): boolean {
+	// Running inside the omp binary: its executable name contains "omp".
+	if (path.basename(process.execPath).toLowerCase().includes("omp")) return true;
+	// Fallback: an omp agent dir means omp is the active host.
+	return fs.existsSync(OMP_AGENT_DIR);
+}
+
+const IS_OMP = detectOmp();
+const AGENT_DIR = IS_OMP ? OMP_AGENT_DIR : PI_AGENT_DIR;
+const SETTINGS_PATH = path.join(AGENT_DIR, "settings.json");
+const OMP_CONFIG_PATH = path.join(AGENT_DIR, "config.yml");
 
 interface Settings {
 	skills?: string[];
@@ -121,12 +142,128 @@ function loadSettings(): Settings {
 }
 
 function saveSettings(settings: Settings): void {
+	fs.mkdirSync(path.dirname(SETTINGS_PATH), { recursive: true });
 	fs.writeFileSync(SETTINGS_PATH, JSON.stringify(settings, null, 2));
 }
 
-// The base directories for skills - used to compute relative paths
-const AGENT_DIR = path.join(os.homedir(), ".pi", "agent");
-const PROJECT_DIR = process.cwd();
+// ═══════════════════════════════════════════════════════════════════════════
+// omp config.yml (skills.ignoredSkills) management
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Read skills.ignoredSkills from omp's config.yml (block or flow list style).
+ */
+function readIgnoredSkills(content: string): string[] {
+	const lines = content.split("\n");
+	const skillsIdx = lines.findIndex(l => /^skills\s*:/.test(l));
+	if (skillsIdx === -1) return [];
+
+	// End of the top-level skills block: next non-empty top-level line
+	let end = lines.length;
+	for (let i = skillsIdx + 1; i < lines.length; i++) {
+		if (lines[i].trim() !== "" && !/^\s/.test(lines[i])) {
+			end = i;
+			break;
+		}
+	}
+
+	for (let i = skillsIdx + 1; i < end; i++) {
+		const m = lines[i].match(/^(\s+)ignoredSkills\s*:(.*)$/);
+		if (!m) continue;
+
+		const inline = m[2].trim();
+		if (inline) {
+			// Flow style: ignoredSkills: [a, b]
+			return inline
+				.replace(/^\[/, "")
+				.replace(/\]$/, "")
+				.split(",")
+				.map(s => s.trim().replace(/^['"]|['"]$/g, ""))
+				.filter(Boolean);
+		}
+
+		const items: string[] = [];
+		for (let j = i + 1; j < end; j++) {
+			const item = lines[j].match(/^\s+-\s*(.+)$/);
+			if (!item) break;
+			items.push(item[1].trim().replace(/^['"]|['"]$/g, ""));
+		}
+		return items;
+	}
+	return [];
+}
+
+/**
+ * Add/remove entries in skills.ignoredSkills within omp's config.yml.
+ * Handles missing skills/ignoredSkills keys; preserves the rest of the file.
+ */
+function updateIgnoredSkills(content: string, add: string[], remove: string[]): string {
+	const next = new Set(readIgnoredSkills(content));
+	for (const n of remove) next.delete(n);
+	for (const n of add) next.add(n);
+	const items = Array.from(next).sort();
+
+	const lines = content.split("\n");
+	const skillsIdx = lines.findIndex(l => /^skills\s*:/.test(l));
+	const ignoredBlock = (indent: string): string[] => [
+		`${indent}ignoredSkills:`,
+		...items.map(n => `${indent}  - ${n}`),
+	];
+
+	if (skillsIdx === -1) {
+		// No skills key: append a new block
+		const out = content.trimEnd();
+		return (out ? out + "\n\n" : "") + ["skills:", ...ignoredBlock("  ")].join("\n") + "\n";
+	}
+
+	// End of the top-level skills block
+	let end = lines.length;
+	for (let i = skillsIdx + 1; i < lines.length; i++) {
+		if (lines[i].trim() !== "" && !/^\s/.test(lines[i])) {
+			end = i;
+			break;
+		}
+	}
+
+	// Find existing ignoredSkills line inside the block
+	for (let i = skillsIdx + 1; i < end; i++) {
+		const m = lines[i].match(/^(\s+)ignoredSkills\s*:.*$/);
+		if (!m) continue;
+		const indent = m[1];
+		// Drop existing list items
+		let listEnd = i + 1;
+		while (listEnd < end && /^\s+-\s+/.test(lines[listEnd])) listEnd++;
+		const updated = items.length > 0
+			? [`${indent}ignoredSkills:`, ...items.map(n => `${indent}  - ${n}`)]
+			: [];
+		lines.splice(i, listEnd - i, ...updated);
+		return lines.join("\n");
+	}
+
+	// No ignoredSkills key: insert at the end of the skills block
+	lines.splice(end, 0, ...ignoredBlock("  "));
+	return lines.join("\n");
+}
+
+
+
+function saveIgnoredSkills(add: string[], remove: string[]): void {
+	fs.mkdirSync(AGENT_DIR, { recursive: true });
+	const content = fs.existsSync(OMP_CONFIG_PATH)
+		? fs.readFileSync(OMP_CONFIG_PATH, "utf-8")
+		: "";
+
+	// Backup before the hand-rolled YAML edit, same as frontmatter writes
+	fs.writeFileSync(OMP_CONFIG_PATH + ".bak", content);
+
+	fs.writeFileSync(OMP_CONFIG_PATH, updateIgnoredSkills(content, add, remove));
+
+	try {
+		fs.unlinkSync(OMP_CONFIG_PATH + ".bak");
+	} catch {
+		// Ignore
+	}
+}
 
 /**
  * Get the set of disabled skill paths from settings.
@@ -173,7 +310,7 @@ function getSkillRelativePath(skillFilePath: string): { path: string; isRelative
 	}
 	
 	// Check if under current project's .pi/
-	const projectPiDir = path.join(PROJECT_DIR, ".pi");
+	const projectPiDir = path.join(process.cwd(), ".pi");
 	if (skillDir.startsWith(projectPiDir + path.sep) || skillDir === projectPiDir) {
 		const rel = path.relative(projectPiDir, skillDir);
 		return { path: rel, isRelative: true };
@@ -203,6 +340,47 @@ function normalizeSettingsPath(entryPath: string): string {
  * When disabling a skill with duplicates, disables ALL paths.
  */
 function applyChanges(changes: Map<string, DisableMode>, skillsByName: Map<string, SkillInfo>): void {
+	if (IS_OMP) {
+		applyChangesOmp(changes, skillsByName);
+		return;
+	}
+	applyChangesPi(changes, skillsByName);
+}
+
+/**
+ * omp: persist disabled skills as skills.ignoredSkills in ~/.omp/agent/config.yml.
+ * Hidden skills use frontmatter, same as pi.
+ */
+function applyChangesOmp(changes: Map<string, DisableMode>, skillsByName: Map<string, SkillInfo>): void {
+	const namesToDisable: string[] = [];
+	const namesToEnable: string[] = [];
+	const skillsToHide: SkillInfo[] = [];
+	const skillsToUnhide: SkillInfo[] = [];
+
+	for (const [skillName, newMode] of changes) {
+		const skill = skillsByName.get(skillName);
+		if (!skill) continue;
+
+		if (newMode === "disabled") {
+			namesToDisable.push(skillName);
+		} else {
+			namesToEnable.push(skillName);
+		}
+		if (newMode === "hidden") {
+			skillsToHide.push(skill);
+		} else if (newMode === "enabled") {
+			skillsToUnhide.push(skill);
+		}
+	}
+
+	if (namesToDisable.length > 0 || namesToEnable.length > 0) {
+		saveIgnoredSkills(namesToDisable, namesToEnable);
+	}
+
+	updateHiddenFrontmatter(skillsToHide, skillsToUnhide);
+}
+
+function applyChangesPi(changes: Map<string, DisableMode>, skillsByName: Map<string, SkillInfo>): void {
 	const settings = loadSettings();
 	const skills = settings.skills ?? [];
 	const newSkills: string[] = [];
@@ -294,7 +472,13 @@ function applyChanges(changes: Map<string, DisableMode>, skillsByName: Map<strin
 	
 	settings.skills = newSkills;
 	saveSettings(settings);
-	
+	updateHiddenFrontmatter(skillsToHide, skillsToUnhide);
+}
+
+/**
+ * Shared frontmatter update: hide adds disable-model-invocation, enable removes hide markers.
+ */
+function updateHiddenFrontmatter(skillsToHide: SkillInfo[], skillsToUnhide: SkillInfo[]): void {
 	// Update frontmatter for hidden skills
 	for (const skill of skillsToHide) {
 		try {
@@ -304,7 +488,7 @@ function applyChanges(changes: Map<string, DisableMode>, skillsByName: Map<strin
 			console.error(`Failed to update frontmatter for ${skill.name}: ${error}`);
 		}
 	}
-	
+
 	// Update frontmatter for un-hidden skills
 	for (const skill of skillsToUnhide) {
 		try {
@@ -572,8 +756,11 @@ function updateSkillFrontmatter(filePath: string, hidden: boolean): void {
  * Load all skills from known directories, deduplicating by name (matching pi's behavior)
  */
 function loadAllSkills(): { skills: SkillInfo[]; byName: Map<string, SkillInfo> } {
-	const settings = loadSettings();
+	const settings = IS_OMP ? {} : loadSettings();
 	const disabledPaths = getDisabledSkillPaths(settings);
+	const disabledNames = IS_OMP
+		? new Set(readIgnoredSkills(fs.existsSync(OMP_CONFIG_PATH) ? fs.readFileSync(OMP_CONFIG_PATH, "utf-8") : ""))
+		: null;
 	const rawSkills: RawSkill[] = [];
 	const visitedRealPaths = new Set<string>();
 	
@@ -581,9 +768,10 @@ function loadAllSkills(): { skills: SkillInfo[]; byName: Map<string, SkillInfo> 
 		{ dir: path.join(os.homedir(), ".codex", "skills"), format: "recursive" },
 		{ dir: path.join(os.homedir(), ".claude", "skills"), format: "claude" },
 		{ dir: path.join(process.cwd(), ".claude", "skills"), format: "claude" },
-		{ dir: path.join(os.homedir(), ".pi", "agent", "skills"), format: "recursive" },
+		{ dir: path.join(AGENT_DIR, "skills"), format: "claude" },
 		{ dir: path.join(os.homedir(), ".pi", "skills"), format: "recursive" },
 		{ dir: path.join(process.cwd(), ".pi", "skills"), format: "recursive" },
+		{ dir: path.join(process.cwd(), ".omp", "skills"), format: "claude" },
 		{ dir: path.join(os.homedir(), ".agents", "skills"), format: "recursive" },
 	];
 
@@ -622,7 +810,9 @@ function loadAllSkills(): { skills: SkillInfo[]; byName: Map<string, SkillInfo> 
 		skill.hasDuplicates = allPaths.length > 1;
 		
 		// Compute mode: disabled > hidden > enabled
-		const isDisabled = allPaths.every(p => isSkillDisabled(p, disabledPaths));
+		const isDisabled = disabledNames
+			? disabledNames.has(name)
+			: allPaths.every(p => isSkillDisabled(p, disabledPaths));
 		if (isDisabled) {
 			skill.mode = "disabled";
 		} else if (skill.hidden) {
