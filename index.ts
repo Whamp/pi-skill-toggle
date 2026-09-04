@@ -32,7 +32,7 @@ interface SkillInfo {
 	filePath: string;        // Primary path (first found, shown to user)
 	allPaths: string[];      // All paths with this name (for disabling all)
 	mode: DisableMode;
-	disableModelInvocation: boolean;  // True if frontmatter has disable-model-invocation: true
+	hidden: boolean;        // True if frontmatter has disable-model-invocation: true or hide: true
 	hasDuplicates: boolean;  // True if multiple paths share this name
 }
 
@@ -213,7 +213,7 @@ function applyChanges(changes: Map<string, DisableMode>, skillsByName: Map<strin
 	
 	// Collect skills that need frontmatter changes
 	const skillsToHide: SkillInfo[] = [];     // Add disable-model-invocation: true
-	const skillsToUnhide: SkillInfo[] = [];   // Remove disable-model-invocation
+	const skillsToUnhide: SkillInfo[] = [];   // Remove hide / disable-model-invocation
 	
 	for (const [skillName, newMode] of changes) {
 		const skill = skillsByName.get(skillName);
@@ -232,7 +232,7 @@ function applyChanges(changes: Map<string, DisableMode>, skillsByName: Map<strin
 			}
 			skillsToHide.push(skill);
 		} else {
-			// enabled: Remove -path from settings.json, remove disable-model-invocation from frontmatter
+			// enabled: Remove -path from settings.json, remove hide markers from frontmatter
 			for (const filePath of skill.allPaths) {
 				pathsToUndisable.add(filePath);
 			}
@@ -339,7 +339,7 @@ interface RawSkill {
 	description: string;
 	filePath: string;
 	realPath: string;
-	disableModelInvocation: boolean;
+	hidden: boolean;
 }
 
 /**
@@ -421,7 +421,7 @@ function loadRawSkill(filePath: string, skills: RawSkill[], visitedRealPaths: Se
 		const content = fs.readFileSync(filePath, "utf-8");
 		const skillDir = path.dirname(filePath);
 		const parentDirName = path.basename(skillDir);
-		const { name, description, disableModelInvocation } = parseFrontmatter(content, parentDirName);
+		const { name, description, hidden } = parseFrontmatter(content, parentDirName);
 		
 		if (!description) return;
 		
@@ -430,27 +430,27 @@ function loadRawSkill(filePath: string, skills: RawSkill[], visitedRealPaths: Se
 			description,
 			filePath,
 			realPath,
-			disableModelInvocation,
+			hidden,
 		});
 	} catch {
 		// Skip invalid skill files
 	}
 }
 
-function parseFrontmatter(content: string, fallbackName: string): { name: string; description: string; disableModelInvocation: boolean } {
+function parseFrontmatter(content: string, fallbackName: string): { name: string; description: string; hidden: boolean } {
 	if (!content.startsWith("---")) {
-		return { name: fallbackName, description: "", disableModelInvocation: false };
+		return { name: fallbackName, description: "", hidden: false };
 	}
 
 	const endIndex = content.indexOf("\n---", 3);
 	if (endIndex === -1) {
-		return { name: fallbackName, description: "", disableModelInvocation: false };
+		return { name: fallbackName, description: "", hidden: false };
 	}
 
 	const frontmatter = content.slice(4, endIndex);
 	let name = fallbackName;
 	let description = "";
-	let disableModelInvocation = false;
+	let hidden = false;
 
 	for (const line of frontmatter.split("\n")) {
 		const colonIndex = line.indexOf(":");
@@ -461,12 +461,12 @@ function parseFrontmatter(content: string, fallbackName: string): { name: string
 
 		if (key === "name") name = value;
 		if (key === "description") description = value;
-		if (key === "disable-model-invocation") {
-			disableModelInvocation = value.toLowerCase() === "true";
+		if (key === "disable-model-invocation" || key === "hide") {
+			hidden = hidden || value.toLowerCase() === "true";
 		}
 	}
 
-	return { name, description, disableModelInvocation };
+	return { name, description, hidden };
 }
 
 /**
@@ -538,10 +538,11 @@ function removeFrontmatterField(content: string, key: string): string {
 }
 
 /**
- * Update a SKILL.md file's disable-model-invocation field.
- * Creates backup before modifying.
+ * Update a SKILL.md file's hide markers.
+ * Hiding writes disable-model-invocation: true; unhiding removes both
+ * disable-model-invocation and hide keys. Creates backup before modifying.
  */
-function updateSkillFrontmatter(filePath: string, disableModelInvocation: boolean): void {
+function updateSkillFrontmatter(filePath: string, hidden: boolean): void {
 	const content = fs.readFileSync(filePath, "utf-8");
 	
 	// Create backup
@@ -549,10 +550,12 @@ function updateSkillFrontmatter(filePath: string, disableModelInvocation: boolea
 	fs.writeFileSync(backupPath, content);
 	
 	let newContent: string;
-	if (disableModelInvocation) {
+	if (hidden) {
 		newContent = setFrontmatterField(content, "disable-model-invocation", "true");
+		newContent = removeFrontmatterField(newContent, "hide");
 	} else {
 		newContent = removeFrontmatterField(content, "disable-model-invocation");
+		newContent = removeFrontmatterField(newContent, "hide");
 	}
 	
 	fs.writeFileSync(filePath, newContent);
@@ -606,7 +609,7 @@ function loadAllSkills(): { skills: SkillInfo[]; byName: Map<string, SkillInfo> 
 				filePath: raw.filePath,
 				allPaths: [], // Will be filled after grouping
 				mode: "enabled", // Will be computed after grouping
-				disableModelInvocation: raw.disableModelInvocation,
+				hidden: raw.hidden,
 				hasDuplicates: false, // Will be computed after grouping
 			});
 		}
@@ -622,7 +625,7 @@ function loadAllSkills(): { skills: SkillInfo[]; byName: Map<string, SkillInfo> 
 		const isDisabled = allPaths.every(p => isSkillDisabled(p, disabledPaths));
 		if (isDisabled) {
 			skill.mode = "disabled";
-		} else if (skill.disableModelInvocation) {
+		} else if (skill.hidden) {
 			skill.mode = "hidden";
 		} else {
 			skill.mode = "enabled";

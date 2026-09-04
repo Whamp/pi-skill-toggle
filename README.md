@@ -59,7 +59,7 @@ Use **hidden** when you still want to call the skill manually via `/skill:name` 
 
 **Examples:** Specialized debugging skills, infrequently-used cloud tools, niche domain skills you call explicitly.
 
-Hidden mode sets `disable-model-invocation: true` in the skill's SKILL.md frontmatter.
+Hidden mode sets `disable-model-invocation: true` in the skill's SKILL.md frontmatter. A skill whose frontmatter contains `hide: true` is treated the same way; both syntaxes are recognized when reading. Toggling hidden in the UI writes `disable-model-invocation: true`, and toggling enabled removes both keys.
 
 ### Fully Disabled
 Use **fully disabled** when you want to clean up your slash command menu so less-used skills don't overwhelm your UI/UX. The skill won't appear anywhere—not in the system prompt, not in `/skill:` completions.
