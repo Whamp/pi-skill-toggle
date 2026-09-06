@@ -34,6 +34,10 @@ This opens an interactive overlay where you can:
 
 ## How It Works
 
+The extension detects whether it is running under **oh-my-pi (omp)** or plain **pi** and persists disabled skills accordingly:
+
+### pi
+
 Skills are disabled by adding `-path` entries to the `skills` array in `~/.pi/agent/settings.json`. For example:
 
 ```json
@@ -52,6 +56,19 @@ This uses pi's built-in resource filtering mechanism. Disabled skills:
 
 **Changes require a restart** (or `/reload`) to take effect.
 
+### oh-my-pi (omp)
+
+Skills are disabled by adding the skill name to `skills.ignoredSkills` in `~/.omp/agent/config.yml` (honors `PI_CONFIG_DIR`, `PI_CODING_AGENT_DIR`, and `OMP_PROFILE`):
+
+```yaml
+skills:
+  ignoredSkills:
+    - postgres
+    - pdf
+```
+
+Hidden mode works identically under omp via SKILL.md frontmatter.
+
 ## Disable Modes
 
 ### Hidden (Default Toggle)
@@ -59,14 +76,14 @@ Use **hidden** when you still want to call the skill manually via `/skill:name` 
 
 **Examples:** Specialized debugging skills, infrequently-used cloud tools, niche domain skills you call explicitly.
 
-Hidden mode sets `disable-model-invocation: true` in the skill's SKILL.md frontmatter.
+Hidden mode sets `disable-model-invocation: true` in the skill's SKILL.md frontmatter. A skill whose frontmatter contains `hide: true` is treated the same way; both syntaxes are recognized when reading. Toggling hidden in the UI writes `disable-model-invocation: true`, and toggling enabled removes both keys.
 
 ### Fully Disabled
 Use **fully disabled** when you want to clean up your slash command menu so less-used skills don't overwhelm your UI/UX. The skill won't appear anywhere—not in the system prompt, not in `/skill:` completions.
 
 **Examples:** Deprecated skills, skills from packages you rarely use, duplicates you'll never need.
 
-Disabled mode adds `-path` entries to settings.json (pi's built-in mechanism).
+Disabled mode adds `-path` entries to settings.json (pi's built-in mechanism). Under omp it adds the skill name to `skills.ignoredSkills` in config.yml.
 
 ## Visual Indicators
 
@@ -112,6 +129,8 @@ The extension discovers skills from:
 5. `~/.pi/skills/` (recursive)
 6. `.pi/skills/` (project, recursive)
 7. `~/.agents/skills/` (recursive)
+8. `~/.omp/agent/skills/` (one level deep; omp agent dir)
+9. `.omp/skills/` (project, one level deep)
 
 ## License
 
