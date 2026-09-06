@@ -201,7 +201,7 @@ function updateIgnoredSkills(content: string, add: string[], remove: string[]): 
 	const next = new Set(readIgnoredSkills(content));
 	for (const n of remove) next.delete(n);
 	for (const n of add) next.add(n);
-	const items = Array.from(next).sort();
+	const items = Array.from(next); // insertion order: existing entries, then newly added
 
 	const lines = content.split("\n");
 	const skillsIdx = lines.findIndex(l => /^skills\s*:/.test(l));
@@ -211,7 +211,9 @@ function updateIgnoredSkills(content: string, add: string[], remove: string[]): 
 	];
 
 	if (skillsIdx === -1) {
-		// No skills key: append a new block
+		// No skills key: append a new block only when there is something to write.
+		// A bare "ignoredSkills:" or "skills:" parses as null, which crashes omp.
+		if (items.length === 0) return content;
 		const out = content.trimEnd();
 		return (out ? out + "\n\n" : "") + ["skills:", ...ignoredBlock("  ")].join("\n") + "\n";
 	}
@@ -237,26 +239,47 @@ function updateIgnoredSkills(content: string, add: string[], remove: string[]): 
 			? [`${indent}ignoredSkills:`, ...items.map(n => `${indent}  - ${n}`)]
 			: [];
 		lines.splice(i, listEnd - i, ...updated);
+		if (items.length === 0) {
+			// If the skills block is now empty, drop the bare "skills:" key too —
+			// a null skills value crashes omp the same way as null ignoredSkills.
+			let end2 = end - (listEnd - i);
+			let blockEmpty = true;
+			for (let j = skillsIdx + 1; j < end2; j++) {
+				const t = lines[j].trim();
+				if (t !== "" && !t.startsWith("#")) {
+					blockEmpty = false;
+					break;
+				}
+			}
+			if (blockEmpty) {
+				let removeEnd = end2;
+				if (removeEnd < lines.length && lines[removeEnd].trim() === "") removeEnd++;
+				// When removing to EOF, keep the trailing "" element (the final newline)
+				if (removeEnd === lines.length && lines.length > 0 && lines[lines.length - 1] === "") removeEnd--;
+				lines.splice(skillsIdx, removeEnd - skillsIdx);
+			}
+		}
 		return lines.join("\n");
 	}
 
-	// No ignoredSkills key: insert at the end of the skills block
+	// No ignoredSkills key: nothing to add means no change
+	if (items.length === 0) return content;
 	lines.splice(end, 0, ...ignoredBlock("  "));
 	return lines.join("\n");
 }
 
-
-
 function saveIgnoredSkills(add: string[], remove: string[]): void {
-	fs.mkdirSync(AGENT_DIR, { recursive: true });
 	const content = fs.existsSync(OMP_CONFIG_PATH)
 		? fs.readFileSync(OMP_CONFIG_PATH, "utf-8")
 		: "";
+	const newContent = updateIgnoredSkills(content, add, remove);
+	if (newContent === content) return;
+
+	fs.mkdirSync(AGENT_DIR, { recursive: true });
 
 	// Backup before the hand-rolled YAML edit, same as frontmatter writes
 	fs.writeFileSync(OMP_CONFIG_PATH + ".bak", content);
-
-	fs.writeFileSync(OMP_CONFIG_PATH, updateIgnoredSkills(content, add, remove));
+	fs.writeFileSync(OMP_CONFIG_PATH, newContent);
 
 	try {
 		fs.unlinkSync(OMP_CONFIG_PATH + ".bak");
